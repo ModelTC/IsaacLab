@@ -154,18 +154,16 @@ def _maybe_uninstall_prebundled_torch(
     *,
     probe_env: dict[str, str],
 ) -> None:
-    """Uninstall pip torch stack when ``sys.path`` would load ``torch`` from a prebundle first."""
+    """Preserve the environment-managed torch stack even when a prebundle appears first."""
+    del pip_cmd, using_uv
+
     if not _torch_first_on_sys_path_is_prebundle(python_exe, env=probe_env):
         return
-    print_info(
-        "The first ``torch`` on ``sys.path`` is under a prebundle directory (e.g. "
-        "``omni.isaac.ml_archive/pip_prebundle``). Uninstalling pip "
-        "``torch``/``torchvision``/``torchaudio`` before continuing."
-    )
-    uninstall_flags = ["-y"] if not using_uv else []
-    run_command(
-        pip_cmd + ["uninstall"] + uninstall_flags + ["torch", "torchvision", "torchaudio"],
-        check=False,
+
+    print_warning(
+        "The first ``torch`` on ``sys.path`` is under an Isaac Sim prebundle directory. "
+        "Preserving the current environment's ``torch``/``torchvision``/``torchaudio`` stack; "
+        "the installer will not uninstall or replace it."
     )
 
 
@@ -268,61 +266,8 @@ def _ensure_pink_ik_dependencies_installed(python_exe: str, pip_cmd: list[str], 
 
 
 def _ensure_cuda_torch() -> None:
-    """Ensure correct PyTorch and CUDA versions are installed."""
-    python_exe = extract_python_exe()
-    pip_cmd = get_pip_command(python_exe)
-    using_uv = pip_cmd[0] == "uv"
-
-    # Base index for torch.
-    base_index = "https://download.pytorch.org/whl"
-
-    # Choose pins per arch.
-    torch_ver = "2.10.0"
-    tv_ver = "0.25.0"
-
-    if is_arm():
-        cuda_ver = "130"
-    else:
-        cuda_ver = "128"
-
-    cuda_tag = f"cu{cuda_ver}"
-    index_url = f"{base_index}/{cuda_tag}"
-
-    want_torch = f"{torch_ver}+{cuda_tag}"
-
-    # Check current torch version using pip show (includes build tags).
-    current_ver = ""
-    try:
-        result = run_command(
-            pip_cmd + ["show", "torch"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode == 0:
-            for line in result.stdout.split("\n"):
-                if line.startswith("Version: "):
-                    current_ver = line.split("Version: ", 1)[1].strip()
-                    break
-    except Exception:
-        pass
-
-    # Skip install if version already matches (including CUDA build tag).
-    if current_ver == want_torch:
-        print_info(f"PyTorch {want_torch} already installed.")
-        return
-
-    # Clean install torch.
-    print_info(f"Installing torch=={torch_ver} and torchvision=={tv_ver} ({cuda_tag}) from {index_url}...")
-
-    # uv pip uninstall does not accept -y
-    uninstall_flags = ["-y"] if not using_uv else []
-    run_command(
-        pip_cmd + ["uninstall"] + uninstall_flags + ["torch", "torchvision", "torchaudio"],
-        check=False,
-    )
-
-    run_command(pip_cmd + ["install", "--index-url", index_url, f"torch=={torch_ver}", f"torchvision=={tv_ver}"])
+    """Skip PyTorch installation so an existing environment-managed torch is preserved."""
+    print_info("Skipping PyTorch install; preserving the current environment-managed torch stack.")
 
 
 # Isaac Sim install settings.
@@ -999,14 +944,14 @@ def command_install(install_type: str = "all") -> None:
         # On ARM Linux pre-install nlopt to dodge its from-source build fallback.
         _maybe_preinstall_arm_nlopt(python_exe, pip_cmd)
 
-        # Drop pip-installed torch if Isaac Sim's deprecated ML prebundle would shadow it.
+        # Preserve the environment-managed torch stack even if an Isaac Sim prebundle is first on sys.path.
         _maybe_uninstall_prebundled_torch(python_exe, pip_cmd, using_uv, probe_env=probe_env)
 
         # Install Isaac Sim if requested.
         if install_isaacsim:
             _install_isaacsim()
 
-        # Install pytorch (version based on arch).
+        # Keep the user's existing PyTorch installation untouched.
         _ensure_cuda_torch()
 
         # Install all submodules (core set + any explicitly requested optional ones).
@@ -1024,8 +969,7 @@ def command_install(install_type: str = "all") -> None:
             for feature_name, selector in extra_features:
                 _install_extra_feature(feature_name, selector)
 
-        # In some rare cases, torch might not be installed properly by setup.py, add one more check here.
-        # Can prevent that from happening.
+        # Keep the user's existing PyTorch installation untouched after optional dependency installs as well.
         _ensure_cuda_torch()
 
         # Ensure Pink IK's runtime dependencies are actually importable.  The kit-bundled

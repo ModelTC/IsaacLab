@@ -301,8 +301,8 @@ class TestMaybeUninstallTorch:
             _maybe_uninstall_prebundled_torch(py, [py, "-m", "pip"], using_uv=False, probe_env={})
         mock_run.assert_not_called()
 
-    def test_uninstalls_torch_stack_with_minus_y_for_pip(self, tmp_path):
-        """When probe returns True and pip is in use, uninstall includes -y flag."""
+    def test_preserves_torch_stack_when_probe_true_for_pip(self, tmp_path):
+        """When probe returns True and pip is in use, no pip uninstall command is issued."""
         py = str(tmp_path / "python")
         with (
             mock.patch(
@@ -310,29 +310,25 @@ class TestMaybeUninstallTorch:
                 return_value=True,
             ),
             mock.patch("isaaclab.cli.commands.install.run_command") as mock_run,
+            mock.patch("isaaclab.cli.commands.install.print_warning") as mock_warning,
         ):
             _maybe_uninstall_prebundled_torch(py, [py, "-m", "pip"], using_uv=False, probe_env={})
-        mock_run.assert_called_once()
-        issued = mock_run.call_args[0][0]
-        assert "uninstall" in issued
-        assert "-y" in issued
-        assert "torch" in issued
-        assert "torchvision" in issued
-        assert "torchaudio" in issued
+        mock_run.assert_not_called()
+        mock_warning.assert_called_once()
 
-    def test_uninstalls_torch_stack_without_minus_y_for_uv(self, tmp_path):
-        """When probe returns True and uv pip is in use, uninstall omits -y (uv doesn't accept it)."""
+    def test_preserves_torch_stack_when_probe_true_for_uv(self, tmp_path):
+        """When probe returns True and uv pip is in use, no pip uninstall command is issued."""
         with (
             mock.patch(
                 "isaaclab.cli.commands.install._torch_first_on_sys_path_is_prebundle",
                 return_value=True,
             ),
             mock.patch("isaaclab.cli.commands.install.run_command") as mock_run,
+            mock.patch("isaaclab.cli.commands.install.print_warning") as mock_warning,
         ):
             _maybe_uninstall_prebundled_torch("/fake/python", ["uv", "pip"], using_uv=True, probe_env={})
-        issued = mock_run.call_args[0][0]
-        assert "uninstall" in issued
-        assert "-y" not in issued
+        mock_run.assert_not_called()
+        mock_warning.assert_called_once()
 
     def test_probe_receives_original_pythonpath(self, tmp_path):
         """The probe_env dict is forwarded unchanged to the torch-probe function."""
@@ -347,218 +343,23 @@ class TestMaybeUninstallTorch:
 
 
 # ---------------------------------------------------------------------------
-# _ensure_cuda_torch  — architecture × environment combinations
+# _ensure_cuda_torch
 # ---------------------------------------------------------------------------
 
 
 class TestEnsureCudaTorch:
-    """Tests for :func:`_ensure_cuda_torch` across architectures and environment types.
+    """Tests for :func:`_ensure_cuda_torch` preserving user-managed PyTorch installs."""
 
-    Combinations tested:
-    - Architecture:  x86 (cu128) vs ARM (cu130)
-    - Pip command:   ``python -m pip`` (venv/conda/kit) vs ``uv pip`` (uv venv)
-    - Torch state:   already installed at correct version; wrong CUDA tag; not installed
-    """
-
-    # ---- x86 scenarios -------------------------------------------------------
-
-    def test_x86_skips_install_when_correct_version_present(self, tmp_path):
-        """x86: torch 2.10.0+cu128 already installed → pip install is not called."""
-        py = str(tmp_path / "python")
-        pip_cmd = [py, "-m", "pip"]
-        pip_show_out = "Name: torch\nVersion: 2.10.0+cu128\n"
-
+    def test_skips_pip_operations(self):
+        """The compatibility hook does not run pip or inspect torch versions."""
         with (
-            mock.patch("isaaclab.cli.commands.install.extract_python_exe", return_value=py),
-            mock.patch("isaaclab.cli.commands.install.get_pip_command", return_value=pip_cmd),
-            mock.patch("isaaclab.cli.commands.install.is_arm", return_value=False),
-            mock.patch("isaaclab.cli.commands.install.run_command", return_value=_cp(0, pip_show_out)) as mock_run,
+            mock.patch("isaaclab.cli.commands.install.run_command") as mock_run,
+            mock.patch("isaaclab.cli.commands.install.print_info") as mock_print_info,
         ):
             _ensure_cuda_torch()
 
-        # Only the initial ``pip show torch`` call; no install.
-        assert mock_run.call_count == 1
-        assert "show" in mock_run.call_args[0][0]
-
-    def test_x86_installs_cu128_when_torch_missing(self, tmp_path):
-        """x86: no torch installed → installs torch+cu128 from pytorch.org/whl/cu128."""
-        py = str(tmp_path / "python")
-        pip_cmd = [py, "-m", "pip"]
-        calls: list[list[str]] = []
-
-        def _run(cmd, **kwargs):
-            calls.append(list(cmd))
-            return _cp(0, "")  # pip show returns nothing → torch absent
-
-        with (
-            mock.patch("isaaclab.cli.commands.install.extract_python_exe", return_value=py),
-            mock.patch("isaaclab.cli.commands.install.get_pip_command", return_value=pip_cmd),
-            mock.patch("isaaclab.cli.commands.install.is_arm", return_value=False),
-            mock.patch("isaaclab.cli.commands.install.run_command", side_effect=_run),
-        ):
-            _ensure_cuda_torch()
-
-        install_cmds = [c for c in calls if "install" in c]
-        combined = " ".join(str(t) for c in install_cmds for t in c)
-        assert "cu128" in combined
-        assert "torch" in combined
-
-    def test_x86_reinstalls_when_wrong_cuda_tag(self, tmp_path):
-        """x86: torch+cu130 installed (ARM build) → uninstalls and reinstalls as cu128."""
-        py = str(tmp_path / "python")
-        pip_cmd = [py, "-m", "pip"]
-        calls: list[list[str]] = []
-
-        def _run(cmd, **kwargs):
-            calls.append(list(cmd))
-            stdout = "Name: torch\nVersion: 2.10.0+cu130\n" if "show" in cmd else ""
-            return _cp(0, stdout)
-
-        with (
-            mock.patch("isaaclab.cli.commands.install.extract_python_exe", return_value=py),
-            mock.patch("isaaclab.cli.commands.install.get_pip_command", return_value=pip_cmd),
-            mock.patch("isaaclab.cli.commands.install.is_arm", return_value=False),
-            mock.patch("isaaclab.cli.commands.install.run_command", side_effect=_run),
-        ):
-            _ensure_cuda_torch()
-
-        assert any("uninstall" in c for c in calls), "Expected an uninstall call"
-        install_cmds = [c for c in calls if "install" in c]
-        combined = " ".join(str(t) for c in install_cmds for t in c)
-        assert "cu128" in combined
-
-    # ---- ARM scenarios -------------------------------------------------------
-
-    def test_arm_installs_cu130_when_torch_missing(self, tmp_path):
-        """ARM: no torch installed → installs torch+cu130 from pytorch.org/whl/cu130."""
-        py = str(tmp_path / "python")
-        pip_cmd = [py, "-m", "pip"]
-        calls: list[list[str]] = []
-
-        def _run(cmd, **kwargs):
-            calls.append(list(cmd))
-            return _cp(0, "")
-
-        with (
-            mock.patch("isaaclab.cli.commands.install.extract_python_exe", return_value=py),
-            mock.patch("isaaclab.cli.commands.install.get_pip_command", return_value=pip_cmd),
-            mock.patch("isaaclab.cli.commands.install.is_arm", return_value=True),
-            mock.patch("isaaclab.cli.commands.install.run_command", side_effect=_run),
-        ):
-            _ensure_cuda_torch()
-
-        install_cmds = [c for c in calls if "install" in c]
-        combined = " ".join(str(t) for c in install_cmds for t in c)
-        assert "cu130" in combined
-
-    def test_arm_skips_install_when_correct_version_present(self, tmp_path):
-        """ARM: torch 2.10.0+cu130 already installed → pip install is not called."""
-        py = str(tmp_path / "python")
-        pip_cmd = [py, "-m", "pip"]
-        pip_show_out = "Name: torch\nVersion: 2.10.0+cu130\n"
-
-        with (
-            mock.patch("isaaclab.cli.commands.install.extract_python_exe", return_value=py),
-            mock.patch("isaaclab.cli.commands.install.get_pip_command", return_value=pip_cmd),
-            mock.patch("isaaclab.cli.commands.install.is_arm", return_value=True),
-            mock.patch("isaaclab.cli.commands.install.run_command", return_value=_cp(0, pip_show_out)) as mock_run,
-        ):
-            _ensure_cuda_torch()
-
-        assert mock_run.call_count == 1
-
-    def test_arm_reinstalls_when_wrong_cuda_tag(self, tmp_path):
-        """ARM: torch+cu128 installed (x86 build) → uninstalls and reinstalls as cu130."""
-        py = str(tmp_path / "python")
-        pip_cmd = [py, "-m", "pip"]
-        calls: list[list[str]] = []
-
-        def _run(cmd, **kwargs):
-            calls.append(list(cmd))
-            stdout = "Name: torch\nVersion: 2.10.0+cu128\n" if "show" in cmd else ""
-            return _cp(0, stdout)
-
-        with (
-            mock.patch("isaaclab.cli.commands.install.extract_python_exe", return_value=py),
-            mock.patch("isaaclab.cli.commands.install.get_pip_command", return_value=pip_cmd),
-            mock.patch("isaaclab.cli.commands.install.is_arm", return_value=True),
-            mock.patch("isaaclab.cli.commands.install.run_command", side_effect=_run),
-        ):
-            _ensure_cuda_torch()
-
-        assert any("uninstall" in c for c in calls)
-        install_cmds = [c for c in calls if "install" in c]
-        combined = " ".join(str(t) for c in install_cmds for t in c)
-        assert "cu130" in combined
-
-    # ---- uv venv environment ------------------------------------------------
-
-    def test_uv_venv_uses_uv_pip_command(self, tmp_path):
-        """In a uv venv get_pip_command returns ['uv', 'pip'] and uninstall omits -y."""
-        py = str(tmp_path / "python")
-        calls: list[list[str]] = []
-
-        def _run(cmd, **kwargs):
-            calls.append(list(cmd))
-            return _cp(0, "")  # no current torch → triggers install
-
-        with (
-            mock.patch("isaaclab.cli.commands.install.extract_python_exe", return_value=py),
-            mock.patch("isaaclab.cli.commands.install.get_pip_command", return_value=["uv", "pip"]),
-            mock.patch("isaaclab.cli.commands.install.is_arm", return_value=False),
-            mock.patch("isaaclab.cli.commands.install.run_command", side_effect=_run),
-        ):
-            _ensure_cuda_torch()
-
-        assert calls[0][0] == "uv", "Expected uv as the pip command prefix"
-        uninstall_calls = [c for c in calls if "uninstall" in c]
-        assert uninstall_calls, "Expected an uninstall call before reinstall"
-        assert "-y" not in uninstall_calls[0], "uv pip uninstall must not include -y"
-
-    # ---- conda / pip venv / kit Python environments -------------------------
-
-    def test_conda_uses_python_m_pip_with_minus_y(self, tmp_path):
-        """In a conda env (no uv), get_pip_command returns python -m pip; uninstall uses -y."""
-        py = str(tmp_path / "conda" / "bin" / "python")
-        pip_cmd = [py, "-m", "pip"]
-        calls: list[list[str]] = []
-
-        def _run(cmd, **kwargs):
-            calls.append(list(cmd))
-            return _cp(0, "")
-
-        with (
-            mock.patch("isaaclab.cli.commands.install.extract_python_exe", return_value=py),
-            mock.patch("isaaclab.cli.commands.install.get_pip_command", return_value=pip_cmd),
-            mock.patch("isaaclab.cli.commands.install.is_arm", return_value=False),
-            mock.patch("isaaclab.cli.commands.install.run_command", side_effect=_run),
-        ):
-            _ensure_cuda_torch()
-
-        uninstall_calls = [c for c in calls if "uninstall" in c]
-        assert uninstall_calls
-        assert "-y" in uninstall_calls[0], "pip uninstall must include -y"
-        assert py in uninstall_calls[0], "Expected python exe in pip command"
-
-    def test_kit_python_uses_python_sh_as_pip_prefix(self, tmp_path):
-        """With Isaac Sim's kit Python, python.sh is the executable prefix in the pip command."""
-        python_sh = str(tmp_path / "_isaac_sim" / "python.sh")
-        pip_cmd = [python_sh, "-m", "pip"]
-        calls: list[list[str]] = []
-
-        def _run(cmd, **kwargs):
-            calls.append(list(cmd))
-            return _cp(0, "")
-
-        with (
-            mock.patch("isaaclab.cli.commands.install.extract_python_exe", return_value=python_sh),
-            mock.patch("isaaclab.cli.commands.install.get_pip_command", return_value=pip_cmd),
-            mock.patch("isaaclab.cli.commands.install.is_arm", return_value=False),
-            mock.patch("isaaclab.cli.commands.install.run_command", side_effect=_run),
-        ):
-            _ensure_cuda_torch()
-
-        assert calls[0][0] == python_sh
+        mock_run.assert_not_called()
+        mock_print_info.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

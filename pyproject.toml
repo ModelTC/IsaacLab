@@ -22,9 +22,9 @@ dependencies = [
     "isaaclab-tasks",
     "isaaclab-tasks-experimental",
     "isaaclab-visualizers",
-    "torch==2.10.0",
-    "torchaudio==2.10.0",
-    "torchvision==0.25.0",
+    "torch>=2.10",
+    "torchaudio>=2.10",
+    "torchvision>=0.25.0",
 ]
 
 [project.optional-dependencies]
